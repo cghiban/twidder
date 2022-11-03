@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"twitwo/service"
+	"twidel/service"
 
-	"github.com/mrjones/oauth"
+	"github.com/kkdai/twitter"
 )
 
 const (
@@ -22,10 +22,11 @@ type Handlers struct {
 	Timeline         http.HandlerFunc
 	InitTwitterLogin http.HandlerFunc
 	GetTwitterToken  http.HandlerFunc
-	GetTimeLine      http.HandlerFunc
+	GetHomeTimeLine  http.HandlerFunc
+	GetUserTimeLine  http.HandlerFunc
 }
 
-func NewHandlers(s *service.ServerClient) Handlers {
+func NewHandlers(s *service.Service) Handlers {
 	return Handlers{
 		Ping: func(w http.ResponseWriter, r *http.Request) {
 
@@ -42,16 +43,28 @@ func NewHandlers(s *service.ServerClient) Handlers {
 			GetTwitterToken(w, r, s)
 		},
 
-		GetTimeLine: func(w http.ResponseWriter, r *http.Request) {
-			GetTimeLine(w, r, s)
+		GetHomeTimeLine: func(w http.ResponseWriter, r *http.Request) {
+			GetTimeLine(w, r, s, "home")
+		},
+		GetUserTimeLine: func(w http.ResponseWriter, r *http.Request) {
+			GetTimeLine(w, r, s, "user")
 		},
 	}
 }
 
-func index(w http.ResponseWriter, r *http.Request, s *service.ServerClient) {
+func index(w http.ResponseWriter, r *http.Request, s *service.Service) {
 
 	if !s.HasAuth(r) {
-		fmt.Fprintf(w, "<BODY><CENTER><A HREF='/request'><IMG SRC='https://g.twimg.com/dev/sites/default/files/images_documentation/sign-in-with-twitter-gray.png'></A></CENTER></BODY>")
+		session, err := s.CookieStore.Get(r, s.SessionName)
+		if err != nil {
+			fmt.Printf("can't get session: %s\n", err)
+		}
+		screenName := ""
+		if session.Values["screen-name"] != nil {
+			screenName = session.Values["screen-name"].(string)
+		}
+
+		fmt.Fprintf(w, "<BODY>%s<CENTER><a href='/request'>twitter login</a></CENTER></BODY>", screenName)
 		return
 	} else {
 		//Logon, redirect to display time line
@@ -61,7 +74,7 @@ func index(w http.ResponseWriter, r *http.Request, s *service.ServerClient) {
 }
 
 // InitTwitterLogin - initializes the OAuth login process
-func InitTwitterLogin(w http.ResponseWriter, r *http.Request, s *service.ServerClient) {
+func InitTwitterLogin(w http.ResponseWriter, r *http.Request, s *service.Service) {
 	fmt.Println("Enter redirect to twitter")
 	fmt.Println("Token URL=", CallbackURL)
 
@@ -70,7 +83,12 @@ func InitTwitterLogin(w http.ResponseWriter, r *http.Request, s *service.ServerC
 		log.Printf("error getting auth url: %s\n", err)
 	}
 
-	session, _ := s.CookieStore.Get(r, s.SessionName)
+	fmt.Printf("token: %+v\n", reqToken)
+
+	session, err := s.CookieStore.Get(r, s.SessionName)
+	if err != nil {
+		fmt.Printf("can't get session: %s\n", err)
+	}
 	session.Values["req-token"] = *reqToken
 	err = session.Save(r, w)
 	if err != nil {
@@ -84,7 +102,7 @@ func InitTwitterLogin(w http.ResponseWriter, r *http.Request, s *service.ServerC
 
 }
 
-func GetTwitterToken(w http.ResponseWriter, r *http.Request, s *service.ServerClient) {
+func GetTwitterToken(w http.ResponseWriter, r *http.Request, s *service.Service) {
 	fmt.Println("Enter Get twitter token")
 	values := r.URL.Query()
 
@@ -100,12 +118,15 @@ func GetTwitterToken(w http.ResponseWriter, r *http.Request, s *service.ServerCl
 		return
 	}
 
-	reqToken := session.Values["req-token"].(oauth.RequestToken)
-	if reqToken.Token != tokenKey {
-		fmt.Printf("Hmmm, got different things: %s - %s\n", reqToken.Token, tokenKey)
+	//reqToken := session.Values["req-token"].(oauth.RequestToken)
+	reqToken, exists := s.OAuthTokens[tokenKey]
+	if !exists || reqToken == nil {
+		fmt.Printf("where's the token?!?!\n")
+		fmt.Printf("err retrieving the req token: %s\n", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 
-	accessToken, err := s.CompleteAuth(&reqToken, verificationCode)
+	accessToken, err := s.CompleteAuth(reqToken, verificationCode)
 	if err != nil {
 		fmt.Printf("err retrieving the access token: %s\n", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -113,14 +134,10 @@ func GetTwitterToken(w http.ResponseWriter, r *http.Request, s *service.ServerCl
 	}
 
 	if accessToken != nil {
-
 		user, err := s.VerifyCredentials(accessToken)
 		if err != nil {
 			fmt.Printf("error retrieving user info: %s\n", err)
 		}
-
-		fmt.Printf("username: @%s\n", user.ScreenName)
-		fmt.Printf("user: %+v\n\n", user)
 
 		session.Values["screen-name"] = user.ScreenName
 		session.Values["acc-token"] = *accessToken
@@ -137,24 +154,36 @@ func GetTwitterToken(w http.ResponseWriter, r *http.Request, s *service.ServerCl
 	http.Redirect(w, r, timelineURL, http.StatusTemporaryRedirect)
 }
 
-func GetTimeLine(w http.ResponseWriter, r *http.Request, s *service.ServerClient) {
+func GetTimeLine(w http.ResponseWriter, r *http.Request, s *service.Service, which string) {
 	aToken, err := s.GetAccessTokenFromSession(r)
-	if err != nil {
+	if err != nil || aToken == nil {
 		fmt.Printf("err getting access token: %s\n", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		//http.Error(w, err.Error(), http.StatusInternalServerError)
+		loginURL := fmt.Sprintf("http://%s/request", r.Host)
+		http.Redirect(w, r, loginURL, http.StatusTemporaryRedirect)
 		return
 	}
-	tweets, bits, _ := s.QueryTimeLine(aToken, 2)
-	fmt.Println("TimeLine=", tweets)
-	fmt.Printf("-- client: ---\n%+v\n-----\n", s)
-	fmt.Printf("-- OAuthConsumer: ---\n%+v\n-----\n", *s.OAuthConsumer)
-	// for k, _ := range twitterService.OAuthTokens {
-	// 	fmt.Printf("\t%s:  %+v\n-----\n", k, *twitterService.OAuthTokens[k])
-	// }
 
-	for _, t := range tweets {
-		fmt.Printf("* #%s -- @%s\n%s\n%s\n\n", t.ID, t.User.ScreenName, t.Entities, t.Text)
+	fmt.Printf("token: %+v\n\n\n\n\n", aToken)
+
+	//var err error
+	tweets := twitter.TimelineTweets{}
+	switch which {
+	case "user":
+		tweets, err = s.UserTimeline(aToken, 20)
+	case "home":
+		tweets, err = s.QueryTimeLine(aToken, 20)
 	}
 
-	fmt.Fprintf(w, "The item is: %s", bits)
+	if err != nil {
+		fmt.Printf("timeline err: %s\n", err)
+	}
+
+	w.Header().Add("Content-type", "text/plain")
+	for _, t := range tweets {
+		fmt.Fprintf(w, "%s // @%s\n", t.CreatedAt, t.User.ScreenName)
+		fmt.Fprintf(w, "%+v\n", t.Entities)
+		fmt.Fprintf(w, "%s\n", t.Text)
+		fmt.Fprintln(w, "-------------")
+	}
 }

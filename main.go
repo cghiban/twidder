@@ -6,43 +6,35 @@ import (
 	"net/http"
 	"os"
 
-	"twitwo/handlers"
-	"twitwo/service"
+	"twidel/handlers"
+	"twidel/service"
 )
 
-var ConsumerKey string
-var ConsumerSecret string
-var twitterService *service.ServerClient
-
 func init() {
-	ConsumerKey = os.Getenv("CONSUMER_KEY")
-	ConsumerSecret = os.Getenv("CONSUMER_SECRET")
+
 }
 
 func main() {
 
-	if ConsumerKey == "" && ConsumerSecret == "" {
-		ConsumerKey = "UffiIkCapOH8vsuYcTJD5Kvzt4Z0tHvnm1NUH4WWqKKP6PbrNj"
-		ConsumerSecret = "9ltl9Qs8AVx1hwab44xiHi1ut"
-		//fmt.Println("Please setup ConsumerKey and ConsumerSecret.")
-		//return
+	consumerKey := os.Getenv("CONSUMER_KEY")
+	consumerSecret := os.Getenv("CONSUMER_SECRET")
+
+	if consumerKey == "" && consumerSecret == "" {
+		fmt.Println("missing CONSUMER_KEY and CONSUMER_SECRET.")
+		return
 	}
 
 	var port *int = flag.Int("port", 9090, "Port to listen on.")
 	flag.Parse()
 
-	fmt.Println("[app] Init server key=", ConsumerKey, " secret=", ConsumerSecret)
-	twitterService = service.NewServerClient(ConsumerKey, ConsumerSecret)
+	svc := service.NewService(consumerKey, consumerSecret)
 
-	handlers := handlers.NewHandlers(twitterService)
+	handlers := handlers.NewHandlers(svc)
 
 	http.HandleFunc("/maketoken", handlers.GetTwitterToken)
 	http.HandleFunc("/request", handlers.InitTwitterLogin)
-	http.HandleFunc("/time", handlers.GetTimeLine)
-	// http.HandleFunc("/follow", GetFollower)
-	// http.HandleFunc("/followids", GetFollowerIDs)
-
-	//http.HandleFunc("/user", GetUserDetail)
+	http.HandleFunc("/time", handlers.GetHomeTimeLine)
+	http.HandleFunc("/my", handlers.GetUserTimeLine)
 	http.HandleFunc("/", handlers.Index)
 
 	u := fmt.Sprintf(":%d", *port)

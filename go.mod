@@ -1,4 +1,4 @@
-module twitwo
+module twidel
 
 go 1.19
 

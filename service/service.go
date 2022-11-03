@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/base64"
 	"encoding/gob"
 	"encoding/json"
 	"errors"
@@ -26,6 +27,7 @@ const (
 	//List API URLs
 	API_BASE           string = "https://api.twitter.com/1.1/"
 	API_TIMELINE       string = API_BASE + "statuses/home_timeline.json"
+	API_USER_TIMELINE  string = API_BASE + "statuses/user_timeline.json"
 	API_FOLLOWERS_IDS  string = API_BASE + "followers/ids.json"
 	API_FOLLOWERS_LIST string = API_BASE + "followers/list.json"
 	API_FOLLOWER_INFO  string = API_BASE + "users/show.json"
@@ -33,14 +35,41 @@ const (
 )
 
 func init() {
+
 	gob.Register(oauth.RequestToken{})
 	gob.Register(oauth.AccessToken{})
 }
 
-func NewServerClient(consumerKey, consumerSecret string) *ServerClient {
-	//newClient := NewClient(consumerKey, consumerKey)
+func NewService(consumerKey, consumerSecret string) *Service {
 
-	newServer := &ServerClient{
+	var err error
+	var authKey, encKey []byte
+	authKeyStr := os.Getenv("SESSION_KEY")
+	if authKeyStr == "" {
+		log.Fatal("SESSION_KEY not set")
+	}
+
+	encKeyStr := os.Getenv("SESSION_ENC_KEY")
+	if encKeyStr == "" {
+		encKey = nil
+	} else {
+		encKey, err = base64.StdEncoding.DecodeString(authKeyStr)
+		if err != nil {
+			log.Fatalf("some error occured during base64 decoding SESSION_KEY. Error %s\n", err)
+		}
+	}
+
+	authKey, err = base64.StdEncoding.DecodeString(authKeyStr)
+	if err != nil {
+		log.Fatalf("some error occured during base64 decoding SESSION_ENC_KEY. Error %s\n", err)
+	}
+
+	cStore := sessions.NewCookieStore(authKey, encKey)
+	cStore.Options.HttpOnly = true
+	//cStore.Options.Secure = true
+	//cStore.Options.SameSite = http.SameSiteStrictMode
+
+	newServer := &Service{
 		OAuthConsumer: oauth.NewConsumer(
 			consumerKey,
 			consumerSecret,
@@ -51,7 +80,7 @@ func NewServerClient(consumerKey, consumerSecret string) *ServerClient {
 			},
 		),
 		OAuthTokens: make(map[string]*oauth.RequestToken),
-		CookieStore: sessions.NewCookieStore([]byte(os.Getenv("SESSION_KEY"))),
+		CookieStore: cStore,
 		SessionName: SESSION_NAME,
 	}
 
@@ -61,15 +90,15 @@ func NewServerClient(consumerKey, consumerSecret string) *ServerClient {
 	return newServer
 }
 
-type ServerClient struct {
-	//twitter.Client
+type Service struct {
+	_             struct{}
 	OAuthConsumer *oauth.Consumer
 	OAuthTokens   map[string]*oauth.RequestToken
 	CookieStore   *sessions.CookieStore
 	SessionName   string
 }
 
-func (s *ServerClient) GetAuthURL(tokenUrl string) (string, *oauth.RequestToken, error) {
+func (s *Service) GetAuthURL(tokenUrl string) (string, *oauth.RequestToken, error) {
 	token, requestUrl, err := s.OAuthConsumer.GetRequestTokenAndUrl(tokenUrl)
 	if err != nil {
 		log.Printf("error in GetRequestTokenAndUrl(): %s\n", err)
@@ -81,30 +110,31 @@ func (s *ServerClient) GetAuthURL(tokenUrl string) (string, *oauth.RequestToken,
 	return requestUrl, token, nil
 }
 
-func (s *ServerClient) CompleteAuth(reqToken *oauth.RequestToken, verificationCode string) (*oauth.AccessToken, error) {
+func (s *Service) CompleteAuth(reqToken *oauth.RequestToken, verificationCode string) (*oauth.AccessToken, error) {
 	accessToken, err := s.OAuthConsumer.AuthorizeToken(reqToken, verificationCode)
 	if err != nil {
 		log.Printf("error completing the auth: %s\n", err)
 		return nil, err
 	}
 
-	fmt.Printf("ServerClient.CompleteAuth(): got accessToken: %s\n", accessToken)
+	fmt.Printf("Service.CompleteAuth(): got accessToken: %s\n", accessToken)
 
-	// s.HttpConn, err = s.OAuthConsumer.MakeHttpClient(accessToken)
-	// if err != nil {
-	// 	log.Println(err)
-	// 	return err
-	// }
 	return accessToken, nil
 }
 
-func (s *ServerClient) GetAccessTokenFromSession(r *http.Request) (*oauth.AccessToken, error) {
+func (s *Service) GetAccessTokenFromSession(r *http.Request) (*oauth.AccessToken, error) {
 	session, err := s.CookieStore.Get(r, s.SessionName)
 	if err != nil {
 		fmt.Printf("BuildClient(r): err retrieving the session object: %s\n", err)
 		// http.Error(w, err.Error(), http.StatusInternalServerError)
 		return nil, errors.New("can't build auth client")
 	}
+
+	fmt.Println("--------------------------")
+	for _, x := range session.Values {
+		fmt.Printf(" ** %s:\t\n", x)
+	}
+	fmt.Println("--------------------------")
 
 	token := session.Values["acc-token"]
 	if token == nil {
@@ -114,7 +144,7 @@ func (s *ServerClient) GetAccessTokenFromSession(r *http.Request) (*oauth.Access
 	return &aToken, nil
 }
 
-func (s *ServerClient) BuildClient(accessToken *oauth.AccessToken) (*http.Client, error) {
+func (s *Service) BuildClient(accessToken *oauth.AccessToken) (*http.Client, error) {
 
 	conn, err := s.OAuthConsumer.MakeHttpClient(accessToken)
 	if err != nil {
@@ -125,9 +155,7 @@ func (s *ServerClient) BuildClient(accessToken *oauth.AccessToken) (*http.Client
 	return conn, nil
 }
 
-//func (s *ServerClient) QueryTimeLinex(n int) (*http.Client, error) {
-
-func (s *ServerClient) HasAuth(r *http.Request) bool {
+func (s *Service) HasAuth(r *http.Request) bool {
 	tk, err := s.GetAccessTokenFromSession(r)
 	if err != nil || tk == nil {
 		return false
@@ -135,23 +163,35 @@ func (s *ServerClient) HasAuth(r *http.Request) bool {
 	return true
 }
 
-func (s *ServerClient) BasicQuery(token *oauth.AccessToken, queryString string) ([]byte, error) {
+func (s *Service) BasicQuery(token *oauth.AccessToken, uri string) ([]byte, error) {
 	c, err := s.BuildClient(token)
 	if err != nil {
 		fmt.Printf("error building the client: %s\n", err)
 	}
 
-	response, err := c.Get(queryString)
+	fmt.Printf("++ gonna retrieve %s\n", uri)
+	resp, err := c.Get(uri)
+	c.CloseIdleConnections()
 	if err != nil {
-		log.Fatal(err)
+		//log.Fatal(err)
+		return nil, err
 	}
-	defer response.Body.Close()
+	defer resp.Body.Close()
+	bits, err := ioutil.ReadAll(resp.Body)
 
-	bits, err := ioutil.ReadAll(response.Body)
+	if resp.StatusCode == http.StatusUnauthorized {
+		fmt.Printf("%d: %s", resp.StatusCode, bits)
+		return nil, errors.New("unauthorized")
+	}
+	if resp.StatusCode/100 != 2 {
+		fmt.Printf("ERR: RESP CODE: %d\n", resp.StatusCode)
+		return nil, fmt.Errorf("error with code %d", resp.StatusCode)
+	}
+
 	return bits, err
 }
 
-func (c *ServerClient) QueryTimeLine(token *oauth.AccessToken, count int) (twitter.TimelineTweets, []byte, error) {
+func (c *Service) QueryTimeLine(token *oauth.AccessToken, count int) (twitter.TimelineTweets, error) {
 	requestURL := fmt.Sprintf("%s?count=%d", API_TIMELINE, count)
 	data, err := c.BasicQuery(token, requestURL)
 	if err != nil {
@@ -159,10 +199,10 @@ func (c *ServerClient) QueryTimeLine(token *oauth.AccessToken, count int) (twitt
 	}
 	ret := twitter.TimelineTweets{}
 	err = json.Unmarshal(data, &ret)
-	return ret, data, err
+	return ret, err
 }
 
-func (c *ServerClient) VerifyCredentials(token *oauth.AccessToken) (twitter.UserDetail, error) {
+func (c *Service) VerifyCredentials(token *oauth.AccessToken) (twitter.UserDetail, error) {
 	requestURL := fmt.Sprintf("%s?skip_status=true&include_email=true", API_ACCOUNT_INFO)
 	data, err := c.BasicQuery(token, requestURL)
 	if err != nil {
@@ -171,4 +211,16 @@ func (c *ServerClient) VerifyCredentials(token *oauth.AccessToken) (twitter.User
 	user := twitter.UserDetail{}
 	err = json.Unmarshal(data, &user)
 	return user, err
+}
+
+func (c *Service) UserTimeline(token *oauth.AccessToken, count int) (twitter.TimelineTweets, error) {
+	requestURL := fmt.Sprintf("%s?count=%d", API_USER_TIMELINE, count)
+	data, err := c.BasicQuery(token, requestURL)
+	if err != nil {
+		fmt.Printf("err UserTimeline(): %s\n", err)
+		return nil, err
+	}
+	ret := twitter.TimelineTweets{}
+	err = json.Unmarshal(data, &ret)
+	return ret, err
 }
